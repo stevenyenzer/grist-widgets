@@ -25,23 +25,35 @@
 
   /* Toolbar */
   .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-    margin: 2px 2px 12px; font-size: 0.85rem; color: var(--muted); }
+    margin: 2px 2px 8px; font-size: 0.85rem; color: var(--muted); }
   .toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .toolbar select { font: inherit; color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 2px 6px; background: var(--card); }
   .toolbar .count { margin-left: auto; }
+  .hint { font-size: 0.78rem; color: var(--muted); }
+
+  /* Finished-status settings panel */
+  details.settings { margin: 0 2px 12px; font-size: 0.85rem; color: var(--muted); }
+  details.settings summary { cursor: pointer; user-select: none; }
+  details.settings summary:focus-visible { outline: 2px solid var(--bar-fill); outline-offset: 2px; }
+  .status-picks { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 2px 2px; }
+  .status-picks label { display: flex; align-items: center; gap: 5px; cursor: pointer;
+    color: var(--text); }
+  .status-picks .none { color: var(--muted); font-style: italic; }
 
   /* Cards */
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 16px 18px; box-shadow: 0 1px 2px rgba(20,20,30,0.05); cursor: pointer;
-    transition: box-shadow 0.12s ease, transform 0.12s ease; }
+    transition: box-shadow 0.12s ease; }
   .card:hover { box-shadow: 0 3px 10px rgba(20,20,30,0.10); }
   .card:focus-visible { outline: 2px solid var(--bar-fill); outline-offset: 2px; }
   .card.overdue { border-left: 4px solid var(--overdue); padding-left: 15px; }
 
-  .card h2 { margin: 0 0 10px; font-size: 1.02rem; font-weight: 600; line-height: 1.3;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Titles wrap up to 3 lines instead of truncating on one */
+  .card h2 { margin: 0 0 10px; font-size: 1.02rem; font-weight: 600; line-height: 1.35;
+    overflow-wrap: break-word;
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 
   .field-label { display: block; font-size: 0.72rem; letter-spacing: 0.02em; color: var(--muted);
     margin: 10px 0 4px; }
@@ -80,10 +92,17 @@
         <option value="36500">any time</option>
       </select>
     </label>
+    <span class="hint">(overdue unfinished projects always show)</span>
     <label><input type="checkbox" id="showDone"> show finished</label>
     <label><input type="checkbox" id="showUndated"> show no-due-date</label>
     <span class="count" id="count"></span>
   </div>
+
+  <details class="settings">
+    <summary>Which statuses count as finished?</summary>
+    <div class="status-picks" id="statusPicks"></div>
+  </details>
+
   <div class="cards" id="cards"></div>
   <div class="empty" id="empty" hidden>Nothing due in this window. Widen the range above, or enjoy the quiet.</div>
 
@@ -91,12 +110,15 @@
 (function () {
   "use strict";
 
-  // Statuses treated as "finished" (hidden unless "show finished" is ticked).
-  // Edit this list if your Status names differ. Matching is case-insensitive.
-  var DONE_STATUSES = ["complete", "invoiced", "paid", "done"];
+  // Fallback guesses used ONLY the first time, before you've saved your own
+  // picks in the "Which statuses count as finished?" panel. Case-insensitive.
+  var DEFAULT_DONE = ["complete", "completed", "invoiced", "paid", "done",
+                      "cancelled", "canceled", "archived"];
 
   var allRecords = [];
   var allMappings = null;
+  var doneSet = null;        // lowercase status names the user marked as finished
+  var savedFromOptions = false;
 
   // ---- helpers ----------------------------------------------------------
 
@@ -129,11 +151,11 @@
     var days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    return days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate();
+    return days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate() +
+      (d.getFullYear() !== new Date().getFullYear() ? ", " + d.getFullYear() : "");
   }
 
-  // Consistent pastel pill color derived from the status text,
-  // so every status gets a stable color without extra configuration.
+  // Consistent pastel pill color derived from the status text.
   function pillColors(text) {
     var hash = 0;
     for (var i = 0; i < text.length; i++) {
@@ -158,6 +180,68 @@
     return Math.max(0, Math.min(100, Math.round(n)));
   }
 
+  function mapped(raw) {
+    return allMappings ? grist.mapColumnNames(raw) : raw;
+  }
+
+  // ---- finished-status settings -----------------------------------------
+
+  function distinctStatuses() {
+    var seen = {};
+    var list = [];
+    for (var i = 0; i < allRecords.length; i++) {
+      var rec = mapped(allRecords[i]);
+      if (!rec) { continue; }
+      var s = rec.Status == null ? "" : String(rec.Status).trim();
+      if (!s) { continue; }
+      var key = s.toLowerCase();
+      if (!seen[key]) { seen[key] = true; list.push(s); }
+    }
+    list.sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; });
+    return list;
+  }
+
+  function ensureDoneSet(statuses) {
+    if (doneSet !== null) { return; }
+    doneSet = {};
+    for (var i = 0; i < statuses.length; i++) {
+      var key = statuses[i].toLowerCase();
+      if (DEFAULT_DONE.indexOf(key) !== -1) { doneSet[key] = true; }
+    }
+  }
+
+  function buildStatusPicker() {
+    var statuses = distinctStatuses();
+    ensureDoneSet(statuses);
+    var box = document.getElementById("statusPicks");
+    box.innerHTML = "";
+    if (!statuses.length) {
+      box.innerHTML = '<span class="none">No Status column mapped, or no statuses found.</span>';
+      return;
+    }
+    statuses.forEach(function (s) {
+      var key = s.toLowerCase();
+      var label = document.createElement("label");
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!doneSet[key];
+      cb.addEventListener("change", function () {
+        if (cb.checked) { doneSet[key] = true; } else { delete doneSet[key]; }
+        persistDoneSet();
+        render();
+      });
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(s));
+      box.appendChild(label);
+    });
+  }
+
+  function persistDoneSet() {
+    // Save your picks inside the Grist document so they survive reloads.
+    try { grist.setOption("doneStatuses", Object.keys(doneSet)); }
+    catch (e) { /* if saving isn't available, picks still apply this session */ }
+  }
+
   // ---- rendering --------------------------------------------------------
 
   function render() {
@@ -169,17 +253,17 @@
     var rows = [];
     for (var i = 0; i < allRecords.length; i++) {
       var raw = allRecords[i];
-      var rec = allMappings ? grist.mapColumnNames(raw) : raw;
+      var rec = mapped(raw);
       if (!rec) { continue; } // required columns not mapped yet
 
-      var status = rec.Status == null ? "" : String(rec.Status);
-      var isDone = DONE_STATUSES.indexOf(status.trim().toLowerCase()) !== -1;
+      var status = rec.Status == null ? "" : String(rec.Status).trim();
+      var isDone = doneSet !== null && !!doneSet[status.toLowerCase()];
       if (isDone && !showDone) { continue; }
 
       var due = toDate(rec.DueDate);
       var diff = due ? dayDiff(today, due) : null;
       if (due) {
-        if (diff > daysAhead) { continue; }   // beyond the window (overdue always shows)
+        if (diff > daysAhead) { continue; }   // beyond the window; overdue passes
       } else if (!showUndated) {
         continue;
       }
@@ -268,9 +352,23 @@
     ]
   });
 
+  // Restore previously saved "finished" picks, if any.
+  try {
+    grist.onOptions(function (options) {
+      if (options && Array.isArray(options.doneStatuses)) {
+        doneSet = {};
+        options.doneStatuses.forEach(function (k) { doneSet[String(k).toLowerCase()] = true; });
+        savedFromOptions = true;
+        buildStatusPicker();
+        render();
+      }
+    });
+  } catch (e) { /* onOptions unavailable: defaults apply */ }
+
   grist.onRecords(function (records, mappings) {
     allRecords = records || [];
     allMappings = mappings || null;
+    buildStatusPicker();
     render();
   });
 })();
