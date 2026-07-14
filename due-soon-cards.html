@@ -125,10 +125,20 @@
   function toDate(v) {
     // Grist may deliver dates as JS Date objects, or as seconds since 1970.
     if (v == null || v === "") { return null; }
-    if (v instanceof Date) { return v; }
-    if (typeof v === "number") { return new Date(v * 1000); }
-    var d = new Date(v);
-    return isNaN(d.getTime()) ? null : d;
+    var d;
+    if (v instanceof Date) { d = v; }
+    else if (typeof v === "number") { d = new Date(v * 1000); }
+    else {
+      d = new Date(v);
+      if (isNaN(d.getTime())) { return null; }
+    }
+    // Grist Date columns are calendar dates stored at midnight UTC.
+    // Rebuild them in local time so "July 27" stays July 27 for anyone
+    // west of UTC (otherwise it renders as the evening of the 26th).
+    if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0) {
+      return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+    }
+    return d;
   }
 
   function startOfDay(d) {
@@ -323,6 +333,11 @@
     document.getElementById("empty").hidden = rows.length > 0;
     document.getElementById("count").textContent =
       rows.length ? rows.length + (rows.length === 1 ? " project" : " projects") : "";
+
+    // Tell Grist which rows are on screen, so any widget linked via
+    // "Select By" is filtered to match the cards.
+    try { grist.setSelectedRows(rows.map(function (r) { return r.id; })); }
+    catch (e) { /* linking unavailable in this context; harmless */ }
   }
 
   // Clicking a card moves Grist's cursor to that record,
@@ -342,6 +357,7 @@
 
   grist.ready({
     requiredAccess: "read table",
+    allowSelectBy: true,
     columns: [
       { name: "Title", title: "Card title", type: "Any" },
       { name: "Percent", title: "Percent complete (0\u2013100)", type: "Int,Numeric,Any", optional: true },
