@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Due Soon Cards</title>
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --bar-track: #ececef;
+    --bar-fill: #16b378;      /* Grist green */
+    --overdue: #d0453e;
+    --radius: 12px;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  body { padding: 12px; }
+
+  /* Toolbar */
+  .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin: 2px 2px 12px; font-size: 0.85rem; color: var(--muted); }
+  .toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .toolbar select { font: inherit; color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 2px 6px; background: var(--card); }
+  .toolbar .count { margin-left: auto; }
+
+  /* Cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px 18px; box-shadow: 0 1px 2px rgba(20,20,30,0.05); cursor: pointer;
+    transition: box-shadow 0.12s ease, transform 0.12s ease; }
+  .card:hover { box-shadow: 0 3px 10px rgba(20,20,30,0.10); }
+  .card:focus-visible { outline: 2px solid var(--bar-fill); outline-offset: 2px; }
+  .card.overdue { border-left: 4px solid var(--overdue); padding-left: 15px; }
+
+  .card h2 { margin: 0 0 10px; font-size: 1.02rem; font-weight: 600; line-height: 1.3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .field-label { display: block; font-size: 0.72rem; letter-spacing: 0.02em; color: var(--muted);
+    margin: 10px 0 4px; }
+
+  .progress-row { display: flex; align-items: center; gap: 10px; }
+  .progress-track { flex: 1; height: 8px; border-radius: 999px; background: var(--bar-track); overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 999px; background: var(--bar-fill);
+    transition: width 0.3s ease; }
+  .progress-pct { font-size: 0.85rem; color: var(--muted); min-width: 2.8em; text-align: right; }
+
+  .due-line { font-size: 0.9rem; }
+  .due-line .rel { color: var(--muted); }
+  .due-line.overdue-text, .due-line.overdue-text .rel { color: var(--overdue); font-weight: 600; }
+
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.82rem;
+    font-weight: 500; }
+
+  .meta { font-size: 0.85rem; color: var(--muted); margin-top: 8px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .empty { padding: 40px 10px; text-align: center; color: var(--muted); font-size: 0.95rem; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .card, .progress-fill { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <label>Due in next
+      <select id="daysAhead">
+        <option value="3">3 days</option>
+        <option value="7" selected>7 days</option>
+        <option value="14">14 days</option>
+        <option value="30">30 days</option>
+        <option value="36500">any time</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="showDone"> show finished</label>
+    <label><input type="checkbox" id="showUndated"> show no-due-date</label>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="cards" id="cards"></div>
+  <div class="empty" id="empty" hidden>Nothing due in this window. Widen the range above, or enjoy the quiet.</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Statuses treated as "finished" (hidden unless "show finished" is ticked).
+  // Edit this list if your Status names differ. Matching is case-insensitive.
+  var DONE_STATUSES = ["complete", "invoiced", "paid", "done"];
+
+  var allRecords = [];
+  var allMappings = null;
+
+  // ---- helpers ----------------------------------------------------------
+
+  function toDate(v) {
+    // Grist may deliver dates as JS Date objects, or as seconds since 1970.
+    if (v == null || v === "") { return null; }
+    if (v instanceof Date) { return v; }
+    if (typeof v === "number") { return new Date(v * 1000); }
+    var d = new Date(v);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  function startOfDay(d) {
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  }
+
+  function dayDiff(from, to) {
+    return Math.round((startOfDay(to) - startOfDay(from)) / 86400000);
+  }
+
+  function relativeLabel(diff) {
+    if (diff === 0) { return "today"; }
+    if (diff === 1) { return "tomorrow"; }
+    if (diff === -1) { return "1 day overdue"; }
+    if (diff < 0) { return (-diff) + " days overdue"; }
+    return "in " + diff + " days";
+  }
+
+  function fmtDate(d) {
+    var days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    return days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate();
+  }
+
+  // Consistent pastel pill color derived from the status text,
+  // so every status gets a stable color without extra configuration.
+  function pillColors(text) {
+    var hash = 0;
+    for (var i = 0; i < text.length; i++) {
+      hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+    }
+    var hue = hash % 360;
+    return {
+      bg: "hsl(" + hue + ", 65%, 92%)",
+      fg: "hsl(" + hue + ", 45%, 30%)"
+    };
+  }
+
+  function esc(s) {
+    var div = document.createElement("div");
+    div.textContent = s == null ? "" : String(s);
+    return div.innerHTML;
+  }
+
+  function clampPct(v) {
+    var n = Number(v);
+    if (isNaN(n)) { return null; }
+    return Math.max(0, Math.min(100, Math.round(n)));
+  }
+
+  // ---- rendering --------------------------------------------------------
+
+  function render() {
+    var daysAhead = Number(document.getElementById("daysAhead").value);
+    var showDone = document.getElementById("showDone").checked;
+    var showUndated = document.getElementById("showUndated").checked;
+    var today = new Date();
+
+    var rows = [];
+    for (var i = 0; i < allRecords.length; i++) {
+      var raw = allRecords[i];
+      var rec = allMappings ? grist.mapColumnNames(raw) : raw;
+      if (!rec) { continue; } // required columns not mapped yet
+
+      var status = rec.Status == null ? "" : String(rec.Status);
+      var isDone = DONE_STATUSES.indexOf(status.trim().toLowerCase()) !== -1;
+      if (isDone && !showDone) { continue; }
+
+      var due = toDate(rec.DueDate);
+      var diff = due ? dayDiff(today, due) : null;
+      if (due) {
+        if (diff > daysAhead) { continue; }   // beyond the window (overdue always shows)
+      } else if (!showUndated) {
+        continue;
+      }
+
+      rows.push({ id: raw.id, rec: rec, due: due, diff: diff, status: status, isDone: isDone });
+    }
+
+    rows.sort(function (a, b) {
+      if (a.due && b.due) { return a.due - b.due; }
+      if (a.due) { return -1; }
+      if (b.due) { return 1; }
+      return 0;
+    });
+
+    var html = "";
+    for (var j = 0; j < rows.length; j++) {
+      var r = rows[j];
+      var overdue = r.diff !== null && r.diff < 0 && !r.isDone;
+      var pct = clampPct(r.rec.Percent);
+
+      html += '<div class="card' + (overdue ? " overdue" : "") +
+              '" tabindex="0" data-rowid="' + r.id + '">';
+      html += "<h2 title=\"" + esc(r.rec.Title) + "\">" + esc(r.rec.Title || "(untitled)") + "</h2>";
+
+      if (pct !== null) {
+        html += '<span class="field-label">Percent Complete</span>';
+        html += '<div class="progress-row"><div class="progress-track">' +
+                '<div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+                '<span class="progress-pct">' + pct + "%</span></div>";
+      }
+
+      if (r.due) {
+        html += '<span class="field-label">Due</span>';
+        html += '<div class="due-line' + (overdue ? " overdue-text" : "") + '">' +
+                esc(fmtDate(r.due)) +
+                ' <span class="rel">&middot; ' + esc(relativeLabel(r.diff)) + "</span></div>";
+      }
+
+      if (r.status) {
+        var c = pillColors(r.status);
+        html += '<span class="field-label">Status</span>';
+        html += '<span class="pill" style="background:' + c.bg + ";color:" + c.fg + '">' +
+                esc(r.status) + "</span>";
+      }
+
+      var metaBits = [];
+      if (r.rec.Client) { metaBits.push(String(r.rec.Client)); }
+      if (r.rec.Type) { metaBits.push(String(r.rec.Type)); }
+      if (metaBits.length) {
+        html += '<div class="meta">' + esc(metaBits.join(" \u00b7 ")) + "</div>";
+      }
+
+      html += "</div>";
+    }
+
+    document.getElementById("cards").innerHTML = html;
+    document.getElementById("empty").hidden = rows.length > 0;
+    document.getElementById("count").textContent =
+      rows.length ? rows.length + (rows.length === 1 ? " project" : " projects") : "";
+  }
+
+  // Clicking a card moves Grist's cursor to that record,
+  // so any widget linked to this one follows along.
+  document.getElementById("cards").addEventListener("click", function (ev) {
+    var card = ev.target.closest(".card");
+    if (!card) { return; }
+    try { grist.setCursorPos({ rowId: Number(card.getAttribute("data-rowid")) }); }
+    catch (e) { /* older API versions: ignore */ }
+  });
+
+  ["daysAhead", "showDone", "showUndated"].forEach(function (id) {
+    document.getElementById(id).addEventListener("change", render);
+  });
+
+  // ---- Grist wiring ------------------------------------------------------
+
+  grist.ready({
+    requiredAccess: "read table",
+    columns: [
+      { name: "Title", title: "Card title", type: "Any" },
+      { name: "Percent", title: "Percent complete (0\u2013100)", type: "Int,Numeric,Any", optional: true },
+      { name: "DueDate", title: "Due date", type: "Date,DateTime", optional: true },
+      { name: "Status", title: "Status", type: "Choice,Text,Any", optional: true },
+      { name: "Client", title: "Client (shown small)", type: "Any", optional: true },
+      { name: "Type", title: "Project type (shown small)", type: "Any", optional: true }
+    ]
+  });
+
+  grist.onRecords(function (records, mappings) {
+    allRecords = records || [];
+    allMappings = mappings || null;
+    render();
+  });
+})();
+</script>
+</body>
+</html>
