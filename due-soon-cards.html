@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Due Soon Cards</title>
-<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script src="grist-plugin-api.js"></script>
 <style>
   :root {
     --bg: #f7f7f8;
@@ -48,7 +48,9 @@
     transition: box-shadow 0.12s ease; }
   .card:hover { box-shadow: 0 3px 10px rgba(20,20,30,0.10); }
   .card:focus-visible { outline: 2px solid var(--bar-fill); outline-offset: 2px; }
-  .card.overdue { border-left: 4px solid var(--overdue); padding-left: 15px; }
+  .card.today { border-left: 4px solid var(--overdue); padding-left: 15px; }
+  .card.selected { outline: 2px solid var(--bar-fill); outline-offset: -2px;
+    box-shadow: 0 3px 10px rgba(20,20,30,0.10); }
 
   /* Titles wrap up to 3 lines instead of truncating on one */
   .card h2 { margin: 0 0 10px; font-size: 1.02rem; font-weight: 600; line-height: 1.35;
@@ -66,7 +68,7 @@
 
   .due-line { font-size: 0.9rem; }
   .due-line .rel { color: var(--muted); }
-  .due-line.overdue-text, .due-line.overdue-text .rel { color: var(--overdue); font-weight: 600; }
+  .due-line.today-text, .due-line.today-text .rel { color: var(--overdue); font-weight: 600; }
 
   .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.82rem;
     font-weight: 500; }
@@ -117,6 +119,7 @@
 
   var allRecords = [];
   var allMappings = null;
+  var selectedId = null;   // card the user has clicked, pinning the linked widget
   var doneSet = null;        // lowercase status names the user marked as finished
   var savedFromOptions = false;
 
@@ -291,10 +294,11 @@
     var html = "";
     for (var j = 0; j < rows.length; j++) {
       var r = rows[j];
-      var overdue = r.diff !== null && r.diff < 0 && !r.isDone;
+      var isToday = r.diff === 0 && !r.isDone;
       var pct = clampPct(r.rec.Percent);
 
-      html += '<div class="card' + (overdue ? " overdue" : "") +
+      html += '<div class="card' + (isToday ? " today" : "") +
+              (r.id === selectedId ? " selected" : "") +
               '" tabindex="0" data-rowid="' + r.id + '">';
       html += "<h2 title=\"" + esc(r.rec.Title) + "\">" + esc(r.rec.Title || "(untitled)") + "</h2>";
 
@@ -307,7 +311,7 @@
 
       if (r.due) {
         html += '<span class="field-label">Due</span>';
-        html += '<div class="due-line' + (overdue ? " overdue-text" : "") + '">' +
+        html += '<div class="due-line' + (isToday ? " today-text" : "") + '">' +
                 esc(fmtDate(r.due)) +
                 ' <span class="rel">&middot; ' + esc(relativeLabel(r.diff)) + "</span></div>";
       }
@@ -334,10 +338,16 @@
     document.getElementById("count").textContent =
       rows.length ? rows.length + (rows.length === 1 ? " project" : " projects") : "";
 
-    // Tell Grist which rows are on screen, so any widget linked via
-    // "Select By" is filtered to match the cards.
-    try { grist.setSelectedRows(rows.map(function (r) { return r.id; })); }
-    catch (e) { /* linking unavailable in this context; harmless */ }
+    // If the selected card is no longer visible (filters changed), drop the selection.
+    if (selectedId !== null && !rows.some(function (r) { return r.id === selectedId; })) {
+      selectedId = null;
+    }
+    // Tell Grist what's selected: one clicked card, or everything visible.
+    // A widget linked via "Select By" shows exactly this set.
+    try {
+      grist.setSelectedRows(selectedId !== null ? [selectedId]
+                            : rows.map(function (r) { return r.id; }));
+    } catch (e) { /* linking unavailable in this context; harmless */ }
   }
 
   // Clicking a card moves Grist's cursor to that record,
@@ -345,8 +355,11 @@
   document.getElementById("cards").addEventListener("click", function (ev) {
     var card = ev.target.closest(".card");
     if (!card) { return; }
-    try { grist.setCursorPos({ rowId: Number(card.getAttribute("data-rowid")) }); }
+    var id = Number(card.getAttribute("data-rowid"));
+    selectedId = (selectedId === id) ? null : id;
+    try { grist.setCursorPos({ rowId: id }); }
     catch (e) { /* older API versions: ignore */ }
+    render();
   });
 
   ["daysAhead", "showDone", "showUndated"].forEach(function (id) {
